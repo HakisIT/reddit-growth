@@ -46,6 +46,12 @@ async function processSubreddit(subredditConfig) {
     // Fetch HTML
     const html = await fetchSubredditHtml(name);
     
+    // Check if fetch was blocked or failed
+    if (!html) {
+      log(`Failed to fetch r/${name}, skipping`);
+      return;
+    }
+    
     // Parse posts
     const posts = parsePosts(html, name);
     
