@@ -1,56 +1,9 @@
-import axios from 'axios';
+import puppeteer from 'puppeteer-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { log, error, warn } from '../utils/logger.js';
 
-/**
- * Pool of modern Chrome User-Agent strings
- */
-const userAgents = [
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 Edg/125.0.0.0',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 Edg/123.0.0.0',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
-];
-
-/**
- * Gets a random User-Agent from the pool
- * @returns {string}
- */
-function getRandomUserAgent() {
-  return userAgents[Math.floor(Math.random() * userAgents.length)];
-}
-
-/**
- * Generates full browser headers for a request
- * @param {string} userAgent - User-Agent string
- * @returns {Object} - Headers object
- */
-function getBrowserHeaders(userAgent) {
-  return {
-    'User-Agent': userAgent,
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Cache-Control': 'max-age=0',
-    'Pragma': 'no-cache',
-    'Upgrade-Insecure-Requests': '1',
-    'sec-ch-ua': '"Chromium";v="125", "Google Chrome";v="125", "Not.A/Brand";v="24"',
-    'sec-ch-ua-mobile': '?0',
-    'sec-ch-ua-platform': '"Windows"',
-    'sec-fetch-dest': 'document',
-    'sec-fetch-mode': 'navigate',
-    'sec-fetch-site': 'none',
-    'sec-fetch-user': '?1',
-    'Referer': 'https://www.reddit.com/',
-    'Connection': 'keep-alive',
-    'DNT': '1'
-  };
-}
+// Use stealth plugin to avoid detection
+puppeteer.use(StealthPlugin());
 
 /**
  * Detects if Reddit has blocked the request
@@ -95,44 +48,28 @@ function sleep(ms) {
 }
 
 /**
- * Parses proxy URL and returns axios proxy config
- * @returns {Object|null} - Axios proxy config or null
+ * Performs human-like scrolling on the page
+ * @param {Page} page - Puppeteer page object
  */
-function getProxyConfig() {
-  const proxyUrl = process.env.REDDIT_PROXY;
-  
-  if (!proxyUrl || proxyUrl.trim() === '') {
-    return null;
-  }
-  
+async function humanScroll(page) {
   try {
-    // Parse proxy URL (supports http://user:pass@host:port format)
-    const url = new URL(proxyUrl.trim());
-    
-    return {
-      protocol: url.protocol.replace(':', ''),
-      host: url.hostname,
-      port: parseInt(url.port) || (url.protocol === 'https:' ? 443 : 80),
-      auth: url.username && url.password ? {
-        username: url.username,
-        password: url.password
-      } : undefined
-    };
+    await page.evaluate(() => {
+      window.scrollBy(0, Math.random() * 800);
+    });
+    await sleep(100 + Math.random() * 200);
   } catch (err) {
-    warn(`Invalid proxy URL format: ${err.message}`);
-    return null;
+    // Ignore scroll errors
   }
 }
 
 /**
- * Fetches raw HTML from a Reddit subreddit's /new page with anti-blocking measures
+ * Fetches raw HTML from a Reddit subreddit using Puppeteer with anti-detection measures
  * @param {string} subreddit - Subreddit name (without r/)
  * @param {number} maxRetries - Maximum number of retries (default: 3)
  * @returns {Promise<string|null>} - Raw HTML content or null if blocked/failed
  */
 export async function fetchSubredditHtml(subreddit, maxRetries = 3) {
-  const url = `https://www.reddit.com/r/${subreddit}/new`;
-  const proxyConfig = getProxyConfig();
+  let browser = null;
   
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
@@ -144,29 +81,107 @@ export async function fetchSubredditHtml(subreddit, maxRetries = 3) {
       
       log(`Fetching r/${subreddit}... (attempt ${attempt}/${maxRetries})`);
       
-      // Get random User-Agent and headers
-      const userAgent = getRandomUserAgent();
-      const headers = getBrowserHeaders(userAgent);
+      // Determine headless mode from environment variable
+      const headless = process.env.PUPPETEER_HEADLESS !== 'false';
       
-      // Build axios config
-      const axiosConfig = {
-        headers,
-        timeout: 15000, // 15 second timeout
-        validateStatus: (status) => status < 500, // Don't throw on 403/404
-        maxRedirects: 5
-      };
+      // Launch browser with anti-detection settings
+      browser = await puppeteer.launch({
+        headless: headless,
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-blink-features=AutomationControlled',
+          '--disable-dev-shm-usage',
+          '--disable-accelerated-2d-canvas',
+          '--no-first-run',
+          '--no-zygote',
+          '--single-process',
+          '--disable-gpu'
+        ],
+        ignoreHTTPSErrors: true,
+        defaultViewport: {
+          width: 1920,
+          height: 1080
+        }
+      });
       
-      // Add proxy if configured
-      if (proxyConfig) {
-        axiosConfig.proxy = proxyConfig;
-        log(`Using proxy: ${proxyConfig.host}:${proxyConfig.port}`);
+      const page = await browser.newPage();
+      
+      // Set realistic browser headers and user agent
+      await page.setUserAgent(
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+      );
+      
+      // Set extra headers to mimic real browser
+      await page.setExtraHTTPHeaders({
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Referer': 'https://www.reddit.com/',
+        'sec-ch-ua': '"Chromium";v="125", "Google Chrome";v="125", "Not.A/Brand";v="24"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
+        'sec-fetch-dest': 'document',
+        'sec-fetch-mode': 'navigate',
+        'sec-fetch-site': 'same-origin',
+        'sec-fetch-user': '?1',
+        'Upgrade-Insecure-Requests': '1',
+        'Cache-Control': 'max-age=0',
+        'DNT': '1'
+      });
+      
+      // Try /hot/ first, fallback to /new/ if needed
+      const urls = [
+        `https://www.reddit.com/r/${subreddit}/hot/`,
+        `https://www.reddit.com/r/${subreddit}/new/`
+      ];
+      
+      let html = null;
+      let navigationSuccess = false;
+      
+      for (const url of urls) {
+        try {
+          log(`Navigating to ${url}...`);
+          
+          // Navigate with networkidle2 to ensure page is fully loaded
+          await page.goto(url, {
+            waitUntil: 'networkidle2',
+            timeout: 30000
+          });
+          
+          // Wait a bit more for dynamic content
+          await sleep(300 + Math.random() * 500);
+          
+          // Human-like scroll behavior
+          await humanScroll(page);
+          
+          // Get the full HTML content
+          html = await page.content();
+          
+          // Check if navigation was successful
+          const pageTitle = await page.title().catch(() => '');
+          if (pageTitle && !pageTitle.toLowerCase().includes('error')) {
+            navigationSuccess = true;
+            break;
+          }
+          
+        } catch (navErr) {
+          warn(`Navigation to ${url} failed: ${navErr.message}`);
+          // Try next URL
+          continue;
+        }
       }
       
-      const response = await axios.get(url, axiosConfig);
+      // Close page
+      await page.close().catch(() => {});
       
-      // Check for 403 or other blocking status codes
-      if (response.status === 403) {
-        warn(`Blocked by Reddit (403) for r/${subreddit}. Retrying...`);
+      // Check if navigation failed
+      if (!navigationSuccess || !html) {
+        warn(`Failed to navigate to r/${subreddit}. Retrying...`);
+        if (browser) {
+          await browser.close().catch(() => {});
+          browser = null;
+        }
         if (attempt < maxRetries) {
           const backoffDelay = Math.min(1000 * Math.pow(2, attempt - 1) + Math.random() * 1000, 5000);
           await sleep(backoffDelay);
@@ -174,24 +189,14 @@ export async function fetchSubredditHtml(subreddit, maxRetries = 3) {
         }
         return null;
       }
-      
-      // Check for non-200 status
-      if (response.status !== 200) {
-        warn(`HTTP ${response.status} for r/${subreddit}. Retrying...`);
-        if (attempt < maxRetries) {
-          const backoffDelay = Math.min(1000 * Math.pow(2, attempt - 1) + Math.random() * 1000, 5000);
-          await sleep(backoffDelay);
-          continue;
-        }
-        return null;
-      }
-      
-      // Get HTML content
-      const html = response.data;
       
       // Check if HTML is empty
       if (!html || html.length === 0) {
         warn(`Empty HTML response for r/${subreddit}. Retrying...`);
+        if (browser) {
+          await browser.close().catch(() => {});
+          browser = null;
+        }
         if (attempt < maxRetries) {
           const backoffDelay = Math.min(1000 * Math.pow(2, attempt - 1) + Math.random() * 1000, 5000);
           await sleep(backoffDelay);
@@ -203,6 +208,10 @@ export async function fetchSubredditHtml(subreddit, maxRetries = 3) {
       // Check if blocked by content analysis
       if (isBlocked(html)) {
         warn(`Blocked by Reddit (403 fallback) for r/${subreddit}. Retrying...`);
+        if (browser) {
+          await browser.close().catch(() => {});
+          browser = null;
+        }
         if (attempt < maxRetries) {
           const backoffDelay = Math.min(1000 * Math.pow(2, attempt - 1) + Math.random() * 1000, 5000);
           await sleep(backoffDelay);
@@ -211,13 +220,28 @@ export async function fetchSubredditHtml(subreddit, maxRetries = 3) {
         return null;
       }
       
-      // Success!
+      // Success! Close browser and return HTML
+      if (browser) {
+        await browser.close().catch(() => {});
+        browser = null;
+      }
+      
       log(`Successfully fetched r/${subreddit} (${html.length} bytes)`);
       return html;
       
     } catch (err) {
-      // Handle timeout or network errors
-      if (err.code === 'ECONNABORTED' || err.code === 'ETIMEDOUT') {
+      // Clean up browser on error
+      if (browser) {
+        try {
+          await browser.close();
+        } catch (closeErr) {
+          // Ignore close errors
+        }
+        browser = null;
+      }
+      
+      // Handle timeout errors
+      if (err.name === 'TimeoutError' || err.message.includes('timeout')) {
         warn(`Timeout fetching r/${subreddit}. Retrying...`);
         if (attempt < maxRetries) {
           const backoffDelay = Math.min(1000 * Math.pow(2, attempt - 1) + Math.random() * 1000, 5000);
@@ -227,9 +251,9 @@ export async function fetchSubredditHtml(subreddit, maxRetries = 3) {
         return null;
       }
       
-      // Handle connection errors
-      if (err.code === 'ECONNREFUSED' || err.code === 'ENOTFOUND' || err.code === 'ECONNRESET') {
-        error(`Connection error fetching r/${subreddit}: ${err.message}`);
+      // Handle navigation errors
+      if (err.message.includes('Navigation') || err.message.includes('net::')) {
+        warn(`Navigation error for r/${subreddit}: ${err.message}. Retrying...`);
         if (attempt < maxRetries) {
           const backoffDelay = Math.min(1000 * Math.pow(2, attempt - 1) + Math.random() * 1000, 5000);
           await sleep(backoffDelay);
@@ -253,4 +277,3 @@ export async function fetchSubredditHtml(subreddit, maxRetries = 3) {
   error(`Failed to fetch r/${subreddit} after ${maxRetries} attempts`);
   return null;
 }
-
